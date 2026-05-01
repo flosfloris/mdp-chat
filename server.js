@@ -111,6 +111,20 @@ async function syncFromFramer() {
 			return "";
 		};
 
+		// Estrae il valore raw (non stringificato) per campi numerici
+		const getRaw = (item, ...names) => {
+			for (const n of names) {
+				const f = fieldByName.get(n.toLowerCase());
+				if (f) {
+					const wrapped = item.fieldData?.[f.id];
+					if (wrapped && typeof wrapped === "object" && "value" in wrapped) {
+						return wrapped.value;
+					}
+				}
+			}
+			return null;
+		};
+
 		const mapped = items
 			.filter((it) => !it.draft)
 			.map((it) => ({
@@ -131,6 +145,8 @@ async function syncFromFramer() {
 				address: get(it, "address", "indirizzo"),
 				municipio: get(it, "municipio", "zona", "district"),
 				ageRange: get(it, "age range", "age", "ages", "età"),
+				ageFrom: getRaw(it, "age_from", "age from"),
+				ageTo: getRaw(it, "age_to", "age to"),
 				price: get(it, "price", "prezzo", "costo"),
 				description: get(it, "description", "descrizione").slice(
 					0,
@@ -170,7 +186,7 @@ syncFromFramer();
 setInterval(syncFromFramer, SYNC_INTERVAL_MS);
 
 // ---------- System prompt ----------
-function buildSystemPrompt(events) {
+function buildSystemPrompt() {
 	const today = new Date().toLocaleDateString("it-IT", {
 		weekday: "long",
 		year: "numeric",
@@ -193,28 +209,166 @@ DOMANDE DA FARE (una per volta, solo se l'info manca, nell'ordine):
 2. Se vuole rimanere a Milano e, in caso, se ha una preferenza di municipio
 3. Eventualmente la tipologia del laboratorio/attività (es. creativo, sportivo, musicale, ristorante…)
 
+COME CERCARE EVENTI:
+- Usa il tool "search_events" SOLO quando hai abbastanza info per restringere (almeno data o età)
+- Se mancano info chiave, prima chiedile (una per volta), poi cerca
+- Le date vanno passate al tool in formato ISO YYYY-MM-DD
+- Per "questo weekend", "domani", ecc. converti tu in date ISO basandoti su OGGI
+
 REGOLE:
 - Chiedi UNA cosa per volta, mai più domande insieme
 - Non chiedere info che l'utente ha già dato
 - Suggerisci max 3 eventi alla volta, i più rilevanti
 - Per ogni evento includi: titolo, data, luogo, fascia d'età, prezzo (se presente)
-- Se non trovi nulla di adatto, dillo chiaramente e suggerisci di iscriversi alla newsletter
-- Non inventare eventi: usa SOLO quelli nella lista qui sotto
-- Se l'utente chiede info non presenti (parcheggio, accessibilità...) dillo onestamente
-
-EVENTI DISPONIBILI (${events.length} eventi futuri):
-${JSON.stringify(events, null, 2)}`;
+- Se il tool non restituisce nulla, dillo chiaramente e suggerisci di iscriversi alla newsletter
+- Non inventare eventi: usa SOLO quelli restituiti dal tool
+- Se l'utente chiede info non presenti (parcheggio, accessibilità...) dillo onestamente`;
 }
 
+// ---------- Event search (tool implementation) ----------
+function parseDate(s) {
+	if (!s) return NaN;
+	const t = new Date(s).getTime();
+	return isNaN(t) ? NaN : t;
+}
+
+function searchEvents({
+	date,
+	dateFrom,
+	dateTo,
+	age,
+	municipio,
+	type,
+	limit = 10,
+} = {}) {
+	const now = Date.now();
+	let candidates = cache.events.filter((e) => {
+		// Esclude eventi già finiti
+		const eFrom = parseDate(e.date);
+		const eTo = parseDate(e.endDate) || eFrom;
+		return !isNaN(eFrom) && (isNaN(eTo) ? eFrom >= now : eTo >= now);
+	});
+
+	if (date) {
+		const target = parseDate(date);
+		if (!isNaN(target)) {
+			const dayEnd = target + 24 * 60 * 60 * 1000 - 1;
+			candidates = candidates.filter((e) => {
+				const eFrom = parseDate(e.date);
+				const eTo = parseDate(e.endDate);
+				const to = isNaN(eTo) ? eFrom : eTo;
+				return eFrom <= dayEnd && to >= target;
+			});
+		}
+	}
+
+	if (dateFrom || dateTo) {
+		const qFrom = dateFrom ? parseDate(dateFrom) : -Infinity;
+		const qTo = dateTo ? parseDate(dateTo) + 24 * 60 * 60 * 1000 - 1 : Infinity;
+		candidates = candidates.filter((e) => {
+			const eFrom = parseDate(e.date);
+			const eTo = parseDate(e.endDate);
+			const to = isNaN(eTo) ? eFrom : eTo;
+			return eFrom <= qTo && to >= qFrom;
+		});
+	}
+
+	if (typeof age === "number") {
+		candidates = candidates.filter((e) => {
+			const from = typeof e.ageFrom === "number" ? e.ageFrom : 0;
+			const to = typeof e.ageTo === "number" ? e.ageTo : 99;
+			return age >= from && age <= to;
+		});
+	}
+
+	if (municipio) {
+		const m = String(municipio).toLowerCase();
+		candidates = candidates.filter((e) =>
+			(e.municipio || "").toLowerCase().includes(m),
+		);
+	}
+
+	if (type) {
+		const t = String(type).toLowerCase();
+		candidates = candidates.filter((e) =>
+			(e.type || "").toLowerCase().includes(t),
+		);
+	}
+
+	candidates.sort((a, b) => parseDate(a.date) - parseDate(b.date));
+
+	const cap = Math.min(Math.max(1, limit || 10), 30);
+	return candidates.slice(0, cap).map((e) => ({
+		title: e.title,
+		date: e.date,
+		endDate: e.endDate || undefined,
+		location: e.location,
+		address: e.address || undefined,
+		municipio: e.municipio || undefined,
+		ageRange: e.ageRange,
+		ageFrom: e.ageFrom ?? undefined,
+		ageTo: e.ageTo ?? undefined,
+		price: e.price || undefined,
+		description: e.description,
+		url: e.url || undefined,
+		type: e.type || undefined,
+	}));
+}
+
+const TOOLS = [
+	{
+		name: "search_events",
+		description:
+			"Cerca eventi futuri per famiglie a Milano dal CMS Milano da Piccoli. Filtra per data, età, municipio, tipologia. Restituisce un array di eventi (max 30). Un evento copre la data X se Date from <= X <= Date to.",
+		input_schema: {
+			type: "object",
+			properties: {
+				date: {
+					type: "string",
+					description:
+						"Data ISO YYYY-MM-DD. Restituisce eventi che cadono in questo giorno (anche se multi-giorno).",
+				},
+				dateFrom: {
+					type: "string",
+					description: "Inizio range ISO YYYY-MM-DD (usa con dateTo).",
+				},
+				dateTo: {
+					type: "string",
+					description: "Fine range ISO YYYY-MM-DD (usa con dateFrom).",
+				},
+				age: {
+					type: "number",
+					description:
+						"Età del bambino in anni. Filtra eventi con age_from <= age <= age_to.",
+				},
+				municipio: {
+					type: "string",
+					description: "Municipio di Milano (es. '1', '3'). Match case-insensitive.",
+				},
+				type: {
+					type: "string",
+					description:
+						"Tipologia (es. 'laboratorio', 'ristorante', 'mostra'). Match case-insensitive.",
+				},
+				limit: {
+					type: "number",
+					description: "Max eventi da restituire. Default 10, max 30.",
+				},
+			},
+		},
+	},
+];
+
+// Mantenuto per /api/health e /api/events: conta eventi futuri ad orizzonte 60gg
 function filteredEvents() {
 	const now = Date.now();
 	const horizon = now + 60 * 24 * 60 * 60 * 1000;
 	return cache.events
 		.filter((e) => {
-			const t = new Date(e.date).getTime();
+			const t = parseDate(e.date);
 			return !isNaN(t) && t >= now && t <= horizon;
 		})
-		.sort((a, b) => new Date(a.date) - new Date(b.date));
+		.sort((a, b) => parseDate(a.date) - parseDate(b.date));
 }
 
 // ---------- Express ----------
@@ -324,7 +478,7 @@ app.post("/api/chat", async (req, res) => {
 		return res.status(400).json({ error: "messages array richiesto" });
 	}
 
-	const trimmed = messages.slice(-12).map((m) => ({
+	const conversation = messages.slice(-12).map((m) => ({
 		role: m.role === "assistant" ? "assistant" : "user",
 		content: String(m.content || "").slice(0, 4000),
 	}));
@@ -338,24 +492,65 @@ app.post("/api/chat", async (req, res) => {
 		res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 	};
 
-	try {
-		const events = filteredEvents();
-		const stream = await anthropic.messages.stream({
-			model: MODEL,
-			max_tokens: 1024,
-			system: buildSystemPrompt(events),
-			messages: trimmed,
-		});
+	const system = buildSystemPrompt();
+	const MAX_TOOL_TURNS = 4;
+	let toolCallsMade = 0;
 
-		for await (const chunk of stream) {
-			if (
-				chunk.type === "content_block_delta" &&
-				chunk.delta?.type === "text_delta"
-			) {
-				send("delta", { text: chunk.delta.text });
+	try {
+		for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+			const stream = anthropic.messages.stream({
+				model: MODEL,
+				max_tokens: 1024,
+				system,
+				tools: TOOLS,
+				messages: conversation,
+			});
+
+			for await (const chunk of stream) {
+				if (
+					chunk.type === "content_block_delta" &&
+					chunk.delta?.type === "text_delta"
+				) {
+					send("delta", { text: chunk.delta.text });
+				}
 			}
+
+			const finalMessage = await stream.finalMessage();
+
+			if (finalMessage.stop_reason !== "tool_use") {
+				break;
+			}
+
+			// Esegui i tool richiesti, accoda assistant + tool_result e ricicla
+			conversation.push({
+				role: "assistant",
+				content: finalMessage.content,
+			});
+
+			const toolResults = [];
+			for (const block of finalMessage.content) {
+				if (block.type !== "tool_use") continue;
+				toolCallsMade++;
+				let result;
+				try {
+					if (block.name === "search_events") {
+						result = searchEvents(block.input || {});
+					} else {
+						result = { error: `Tool sconosciuto: ${block.name}` };
+					}
+				} catch (e) {
+					result = { error: e.message || "Tool error" };
+				}
+				toolResults.push({
+					type: "tool_result",
+					tool_use_id: block.id,
+					content: JSON.stringify(result),
+				});
+			}
+			conversation.push({ role: "user", content: toolResults });
 		}
-		send("done", { ok: true, eventsUsed: events.length });
+
+		send("done", { ok: true, toolCallsMade });
 	} catch (err) {
 		console.error("[chat] errore:", err);
 		send("error", { message: err.message || "Errore interno" });
