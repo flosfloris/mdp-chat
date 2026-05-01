@@ -153,7 +153,7 @@ async function syncFromFramer() {
 				price: get(it, "price", "prezzo", "costo"),
 				description: get(it, "description", "descrizione").slice(
 					0,
-					500,
+					200,
 				),
 				url: get(it, "url", "link"),
 				type: get(it, "type", "tipo", "categoria"),
@@ -205,12 +205,14 @@ OGGI È: ${today}
 TONO:
 - Caldo, pratico, mai prolisso
 - Italiano colloquiale ma curato
+- Dai sempre del TU all'utente, mai del Lei
 - Mai usare emoji a meno che non lo faccia l'utente per primo
 
 DOMANDE DA FARE (una per volta, solo se l'info manca, nell'ordine):
 1. Età del bambino
-2. Se vuole rimanere a Milano e, in caso, se ha una preferenza di municipio
-3. Eventualmente la tipologia del laboratorio/attività (es. creativo, sportivo, musicale, ristorante…)
+2. Quando: data o periodo (oggi, weekend, una data specifica, prossime settimane)
+3. Se vuole rimanere a Milano e, in caso, se ha una preferenza di municipio
+4. Eventualmente la tipologia del laboratorio/attività (es. creativo, sportivo, musicale, ristorante…)
 
 COME CERCARE EVENTI:
 - Usa il tool "search_events" SOLO quando hai abbastanza info per restringere (almeno data o età)
@@ -221,6 +223,7 @@ COME CERCARE EVENTI:
 REGOLE:
 - Chiedi UNA cosa per volta, mai più domande insieme
 - Non chiedere info che l'utente ha già dato
+- Non ripetere/riformulare quello che l'utente ti ha appena detto come conferma (no "Bene, Milano!", "Perfetto, 3 anni!"). Se vuoi acknowledgement, basta "Ok!" o passa direttamente alla prossima domanda
 - Suggerisci max 3 eventi alla volta, i più rilevanti
 - Per ogni evento includi: titolo, data, luogo, fascia d'età, prezzo (se presente)
 - IMPORTANTE: ogni titolo evento deve essere un link Markdown cliccabile usando il campo "pageUrl" del tool result (pagina su milanodapiccoli.it), formato esatto: [Titolo evento](pageUrl). Se "pageUrl" è vuoto, scrivi solo il titolo senza link.
@@ -315,13 +318,13 @@ function searchEvents({
 
 	candidates.sort((a, b) => parseDate(a.date) - parseDate(b.date));
 
-	const cap = Math.min(Math.max(1, limit || 10), 30);
+	const cap = Math.min(Math.max(1, limit || 5), 15);
 	return candidates.slice(0, cap).map((e) => ({
 		title: e.title,
 		date: e.date,
-		endDate: e.endDate || undefined,
+		// solo se multi-giorno
+		endDate: e.endDate && e.endDate !== e.date ? e.endDate : undefined,
 		location: e.location,
-		address: e.address || undefined,
 		municipio: e.municipio || undefined,
 		ageRange: e.ageRange,
 		ageFrom: e.ageFrom ?? undefined,
@@ -338,7 +341,7 @@ const TOOLS = [
 	{
 		name: "search_events",
 		description:
-			"Cerca eventi futuri per famiglie a Milano dal CMS Milano da Piccoli. Filtra per data, età, municipio, tipologia. Restituisce un array di eventi (max 30). Un evento copre la data X se Date from <= X <= Date to.",
+			"Cerca eventi futuri per famiglie a Milano dal CMS Milano da Piccoli. Filtra per data, età, municipio, tipologia. Restituisce un array di eventi (max 15). Un evento copre la data X se Date from <= X <= Date to.",
 		input_schema: {
 			type: "object",
 			properties: {
@@ -371,7 +374,7 @@ const TOOLS = [
 				},
 				limit: {
 					type: "number",
-					description: "Max eventi da restituire. Default 10, max 30.",
+					description: "Max eventi da restituire. Default 5, max 15.",
 				},
 			},
 		},
@@ -497,7 +500,7 @@ app.post("/api/chat", async (req, res) => {
 		return res.status(400).json({ error: "messages array richiesto" });
 	}
 
-	const conversation = messages.slice(-12).map((m) => ({
+	const conversation = messages.slice(-8).map((m) => ({
 		role: m.role === "assistant" ? "assistant" : "user",
 		content: String(m.content || "").slice(0, 4000),
 	}));
@@ -512,7 +515,7 @@ app.post("/api/chat", async (req, res) => {
 	};
 
 	const system = buildSystemPrompt();
-	const MAX_TOOL_TURNS = 4;
+	const MAX_TOOL_TURNS = 2;
 	let toolCallsMade = 0;
 
 	try {
