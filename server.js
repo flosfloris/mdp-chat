@@ -219,6 +219,7 @@ COME CERCARE EVENTI:
 - Se mancano info chiave, prima chiedile (una per volta), poi cerca
 - Le date vanno passate al tool in formato ISO YYYY-MM-DD
 - Per "questo weekend", "domani", ecc. converti tu in date ISO basandoti su OGGI
+- Se l'utente nomina un posto specifico (libreria, museo, teatro, "casa dei gufetti", "triennale"...), passa quel nome come parametro "query" del tool — è il modo per trovare un evento specifico tra tanti
 
 REGOLE:
 - Chiedi UNA cosa per volta, mai più domande insieme
@@ -247,7 +248,8 @@ function searchEvents({
 	age,
 	municipio,
 	type,
-	limit = 10,
+	query,
+	limit = 5,
 } = {}) {
 	const now = Date.now();
 	let candidates = cache.events.filter((e) => {
@@ -316,6 +318,23 @@ function searchEvents({
 		);
 	}
 
+	if (query) {
+		// Substring case-insensitive su titolo, location, descrizione
+		const q = String(query).toLowerCase();
+		candidates = candidates.filter((e) => {
+			const haystack = [
+				e.title,
+				e.location,
+				e.description,
+				e.slug,
+			]
+				.filter(Boolean)
+				.join(" ")
+				.toLowerCase();
+			return haystack.includes(q);
+		});
+	}
+
 	candidates.sort((a, b) => parseDate(a.date) - parseDate(b.date));
 
 	const cap = Math.min(Math.max(1, limit || 5), 15);
@@ -371,6 +390,11 @@ const TOOLS = [
 					type: "string",
 					description:
 						"Tipologia (es. 'laboratorio', 'ristorante', 'mostra'). Match case-insensitive.",
+				},
+				query: {
+					type: "string",
+					description:
+						"Parola chiave per cercare nel titolo/luogo/descrizione (es. nome di una libreria, museo, location: 'gufetti', 'triennale'). Match case-insensitive substring.",
 				},
 				limit: {
 					type: "number",
