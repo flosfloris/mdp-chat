@@ -1,0 +1,23 @@
+# Render Blueprint - https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: mdp-chatbot
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: FRAMER_API_KEY
+        sync: false
+      - key: FRAMER_PROJECT_URL
+        sync: false
+      - key: FRAMER_EVENTS_COLLECTION_ID
+        value: EcErkNOK6
+      - key: ALLOWED_ORIGIN
+        value: https://milanodapiccoli.it
+      - key: MODEL
+        value: claude-haiku-4-5-20251001
+      - key: SYNC_INTERVAL_MS
+        value: "300000"
