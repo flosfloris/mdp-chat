@@ -35,6 +35,9 @@ const FRAMER_API_KEY = process.env.FRAMER_API_KEY;
 const EVENTS_COLLECTION_ID =
 	process.env.FRAMER_EVENTS_COLLECTION_ID || "EcErkNOK6";
 const SYNC_INTERVAL_MS = Number(process.env.SYNC_INTERVAL_MS || 5 * 60 * 1000);
+// Base URL della pagina evento sul sito; lo slug viene appeso in coda.
+const EVENT_PAGE_BASE =
+	process.env.EVENT_PAGE_BASE || "https://www.milanodapiccoli.it/eventi/";
 
 const anthropic = new Anthropic();
 
@@ -220,6 +223,8 @@ REGOLE:
 - Non chiedere info che l'utente ha già dato
 - Suggerisci max 3 eventi alla volta, i più rilevanti
 - Per ogni evento includi: titolo, data, luogo, fascia d'età, prezzo (se presente)
+- IMPORTANTE: ogni titolo evento deve essere un link Markdown cliccabile usando il campo "pageUrl" del tool result (pagina su milanodapiccoli.it), formato esatto: [Titolo evento](pageUrl). Se "pageUrl" è vuoto, scrivi solo il titolo senza link.
+- Se l'utente chiede dove prenotare/comprare biglietti e il campo "bookingUrl" è presente, puoi aggiungere [Prenota](bookingUrl) accanto.
 - Se il tool non restituisce nulla, dillo chiaramente e suggerisci di iscriversi alla newsletter
 - Non inventare eventi: usa SOLO quelli restituiti dal tool
 - Se l'utente chiede info non presenti (parcheggio, accessibilità...) dillo onestamente`;
@@ -275,9 +280,22 @@ function searchEvents({
 
 	if (typeof age === "number") {
 		candidates = candidates.filter((e) => {
-			const from = typeof e.ageFrom === "number" ? e.ageFrom : 0;
-			const to = typeof e.ageTo === "number" ? e.ageTo : 99;
-			return age >= from && age <= to;
+			// Se la fascia è esplicitamente "non specificata" o "tutte le età",
+			// l'evento è aperto a qualsiasi età
+			const label = (e.ageRange || "").toLowerCase();
+			if (
+				label.includes("non specificat") ||
+				label.includes("tutte le et")
+			) {
+				return true;
+			}
+			const from = typeof e.ageFrom === "number" ? e.ageFrom : null;
+			const to = typeof e.ageTo === "number" ? e.ageTo : null;
+			// Se mancano entrambi i numeri o sono entrambi 0 (campo non
+			// compilato), considera l'evento aperto a tutte le età
+			if (from === null && to === null) return true;
+			if ((from ?? 0) === 0 && (to ?? 0) === 0) return true;
+			return age >= (from ?? 0) && age <= (to ?? 99);
 		});
 	}
 
@@ -310,7 +328,8 @@ function searchEvents({
 		ageTo: e.ageTo ?? undefined,
 		price: e.price || undefined,
 		description: e.description,
-		url: e.url || undefined,
+		pageUrl: e.slug ? EVENT_PAGE_BASE + e.slug : undefined,
+		bookingUrl: e.url || undefined,
 		type: e.type || undefined,
 	}));
 }
