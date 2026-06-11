@@ -5,7 +5,7 @@
 //
 // USO IN FRAMER:
 // 1. Aggiungi il componente alla pagina (o al template globale)
-// 2. Imposta "Backend URL" → es. https://mdp-chatbot.onrender.com
+// 2. Imposta "Backend URL" → es. https://mdp-chat.onrender.com
 // 3. Personalizza colori, posizione, messaggio di benvenuto
 // 4. Pubblica.
 
@@ -22,6 +22,9 @@ type Props = {
     placeholder: string
     title: string
     position: "bottom-right" | "bottom-left"
+    showTeaser: boolean
+    teaserMessage: string
+    teaserDelay: number
 }
 
 const STORAGE_KEY = "mdp_chatbot_history_v1"
@@ -41,14 +44,29 @@ export default function Chatbot({
     placeholder = "Scrivi qui...",
     title = "Milano da Piccoli",
     position = "bottom-right",
+    showTeaser = true,
+    teaserMessage = "Ciao! Posso aiutarti? 👋",
+    teaserDelay = 1.5,
 }: Props) {
     const [open, setOpen] = React.useState(false)
     const [messages, setMessages] = React.useState<Message[]>([])
     const [input, setInput] = React.useState("")
     const [streaming, setStreaming] = React.useState(false)
     const [error, setError] = React.useState<string | null>(null)
+    const [teaserVisible, setTeaserVisible] = React.useState(false)
     const scrollRef = React.useRef<HTMLDivElement>(null)
     const abortRef = React.useRef<AbortController | null>(null)
+
+    // Teaser: compare dopo un ritardo e resta sempre visibile (niente
+    // chiusura manuale); sparisce solo quando si apre la chat.
+    React.useEffect(() => {
+        if (!showTeaser || open) return
+        const t = setTimeout(
+            () => setTeaserVisible(true),
+            Math.max(0, teaserDelay) * 1000
+        )
+        return () => clearTimeout(t)
+    }, [showTeaser, open, teaserDelay])
 
     // Restore history
     React.useEffect(() => {
@@ -339,9 +357,58 @@ export default function Chatbot({
                 </div>
             )}
 
+            {/* Teaser: bolla d'invito sopra il bottone */}
+            {!open && teaserVisible && (
+                <div
+                    role="button"
+                    onClick={() => {
+                        setTeaserVisible(false)
+                        setOpen(true)
+                    }}
+                    style={{
+                        position: "absolute",
+                        bottom: 72,
+                        ...(position === "bottom-left"
+                            ? { left: 4 }
+                            : { right: 4 }),
+                        maxWidth: 220,
+                        background: "#fff",
+                        color: "#222",
+                        padding: "12px 14px",
+                        borderRadius: 14,
+                        boxShadow: "0 8px 28px rgba(0,0,0,0.16)",
+                        fontSize: 14,
+                        lineHeight: 1.4,
+                        cursor: "pointer",
+                        whiteSpace: "pre-wrap",
+                        animation: "mdpFadeUp 0.2s ease-out",
+                    }}
+                >
+                    {teaserMessage}
+                    {/* Codina che punta al bottone */}
+                    <div
+                        style={{
+                            position: "absolute",
+                            bottom: -7,
+                            ...(position === "bottom-left"
+                                ? { left: 22 }
+                                : { right: 22 }),
+                            width: 14,
+                            height: 14,
+                            background: "#fff",
+                            transform: "rotate(45deg)",
+                            boxShadow: "3px 3px 6px rgba(0,0,0,0.06)",
+                        }}
+                    />
+                </div>
+            )}
+
             {/* Bottone flottante */}
             <button
-                onClick={() => setOpen((o) => !o)}
+                onClick={() => {
+                    setTeaserVisible(false)
+                    setOpen((o) => !o)
+                }}
                 aria-label={open ? "Chiudi chat" : "Apri chat"}
                 style={{
                     width: 56,
@@ -492,6 +559,30 @@ addPropertyControls(Chatbot, {
         type: ControlType.String,
         title: "Placeholder",
         defaultValue: "Scrivi qui...",
+    },
+    showTeaser: {
+        type: ControlType.Boolean,
+        title: "Teaser",
+        defaultValue: true,
+        enabledTitle: "On",
+        disabledTitle: "Off",
+    },
+    teaserMessage: {
+        type: ControlType.String,
+        title: "Teaser text",
+        defaultValue: "Ciao! Posso aiutarti? 👋",
+        displayTextArea: true,
+        hidden: (props) => !props.showTeaser,
+    },
+    teaserDelay: {
+        type: ControlType.Number,
+        title: "Teaser delay",
+        defaultValue: 1.5,
+        min: 0,
+        max: 20,
+        step: 0.5,
+        unit: "s",
+        hidden: (props) => !props.showTeaser,
     },
     brandColor: {
         type: ControlType.Color,
