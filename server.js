@@ -23,6 +23,7 @@
 import "./ws-polyfill.js";
 import express from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import Anthropic from "@anthropic-ai/sdk";
 import { connect } from "framer-api";
 import "dotenv/config";
@@ -214,12 +215,14 @@ DOMANDE DA FARE (una per volta, solo se l'info manca, nell'ordine):
 3. Se vuole rimanere a Milano e, in caso, se ha una preferenza di municipio
 4. Eventualmente la tipologia del laboratorio/attività (es. creativo, sportivo, musicale, ristorante…)
 
+ECCEZIONE IMPORTANTE: se l'utente nomina già un evento, un'iniziativa, un festival o un luogo specifico (es. "green week", "FAMU", "notte dei musei", "casa dei gufetti", "triennale", una libreria/museo/teatro per nome), NON partire col questionario: cerca SUBITO passando quel nome come parametro "query" del tool, senza chiedere prima età o data. Solo dopo aver mostrato i risultati puoi eventualmente chiedere età/quando per restringere.
+
 COME CERCARE EVENTI:
-- Usa il tool "search_events" SOLO quando hai abbastanza info per restringere (almeno data o età)
-- Se mancano info chiave, prima chiedile (una per volta), poi cerca
+- Usa il tool "search_events" appena hai un criterio utile per restringere: una data, un'età, OPPURE il nome di un evento/iniziativa/luogo (parametro "query"). Il nome di un'iniziativa da solo è già sufficiente per cercare.
+- Se l'utente fa una richiesta generica ("cosa c'è per i bambini?") senza nominare nulla di specifico, allora chiedi prima età o data (una domanda per volta), poi cerca
 - Le date vanno passate al tool in formato ISO YYYY-MM-DD
 - Per "questo weekend", "domani", ecc. converti tu in date ISO basandoti su OGGI
-- Se l'utente nomina un posto specifico (libreria, museo, teatro, "casa dei gufetti", "triennale"...), passa quel nome come parametro "query" del tool — è il modo per trovare un evento specifico tra tanti
+- Quando l'utente nomina un posto o un'iniziativa specifica (libreria, museo, teatro, festival, "green week", "casa dei gufetti", "triennale"...), passa quel nome come parametro "query" del tool — è il modo per trovare un evento specifico tra tanti
 
 REGOLE:
 - Chiedi UNA cosa per volta, mai più domande insieme
@@ -319,19 +322,23 @@ function searchEvents({
 	}
 
 	if (query) {
-		// Substring case-insensitive su titolo, location, descrizione
-		const q = String(query).toLowerCase();
+		// Match per parole: tutte le parole della query devono comparire nel
+		// testo dell'evento (titolo/luogo/descrizione/slug). In più, una
+		// versione "collassata" (senza spazi/punteggiatura) per far matchare
+		// "green week" anche con "GreenWeek".
+		const raw = String(query).toLowerCase().trim();
+		const terms = raw.split(/\s+/).filter(Boolean);
+		const collapse = (s) => s.replace(/[^a-z0-9]+/gi, "");
+		const qCollapsed = collapse(raw);
 		candidates = candidates.filter((e) => {
-			const haystack = [
-				e.title,
-				e.location,
-				e.description,
-				e.slug,
-			]
+			const haystack = [e.title, e.location, e.description, e.slug]
 				.filter(Boolean)
 				.join(" ")
 				.toLowerCase();
-			return haystack.includes(q);
+			const allTerms = terms.every((t) => haystack.includes(t));
+			const collapsedMatch =
+				qCollapsed.length > 0 && collapse(haystack).includes(qCollapsed);
+			return allTerms || collapsedMatch;
 		});
 	}
 
@@ -419,8 +426,21 @@ function filteredEvents() {
 
 // ---------- Express ----------
 const app = express();
+// Render/Cloudflare mettono il vero IP client in X-Forwarded-For: serve per
+// far funzionare il rate limit per-IP (senza, tutti condividono un bucket).
+app.set("trust proxy", 1);
 app.use(express.json({ limit: "100kb" }));
 app.use(cors({ origin: ALLOWED_ORIGIN, methods: ["POST", "GET"] }));
+
+// Rate limit sull'endpoint costoso: protegge il budget Anthropic da abusi.
+// CORS blocca solo i browser; questo blocca anche script/curl.
+const chatLimiter = rateLimit({
+	windowMs: 60 * 1000,
+	limit: 20, // max 20 messaggi/minuto per IP
+	standardHeaders: true,
+	legacyHeaders: false,
+	message: { error: "Troppe richieste, riprova tra poco." },
+});
 
 app.get("/api/health", (req, res) => {
 	res.json({
@@ -517,7 +537,7 @@ app.get("/api/debug", async (req, res) => {
 	}
 });
 
-app.post("/api/chat", async (req, res) => {
+app.post("/api/chat", chatLimiter, async (req, res) => {
 	const { messages } = req.body || {};
 
 	if (!Array.isArray(messages) || messages.length === 0) {
@@ -538,7 +558,18 @@ app.post("/api/chat", async (req, res) => {
 		res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 	};
 
-	const system = buildSystemPrompt();
+	// System prompt come blocco cacheable: il breakpoint sul system mette in
+	// cache anche i tools (vengono prima nel prompt). NOTA: su Haiku il caching
+	// si attiva solo se il prefisso cacheable supera ~2048 token; oggi system+
+	// tools sono ~1800, quindi è inattivo ma a costo zero, e scatta da solo se
+	// il prompt cresce (o se si passa a un modello con soglia più bassa).
+	const systemBlocks = [
+		{
+			type: "text",
+			text: buildSystemPrompt(),
+			cache_control: { type: "ephemeral" },
+		},
+	];
 	const MAX_TOOL_TURNS = 2;
 	let toolCallsMade = 0;
 
@@ -547,7 +578,7 @@ app.post("/api/chat", async (req, res) => {
 			const stream = anthropic.messages.stream({
 				model: MODEL,
 				max_tokens: 1024,
-				system,
+				system: systemBlocks,
 				tools: TOOLS,
 				messages: conversation,
 			});
